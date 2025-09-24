@@ -1,69 +1,71 @@
-# syntax = docker/dockerfile:1
+# syntax=docker/dockerfile:1
+FROM ruby:3.2.4-slim-bookworm
 
-# This Dockerfile is designed for production, not development. Use with Kamal or build'n'run by hand:
-# docker build -t my-app .
-# docker run -d -p 80:80 -p 443:443 --name my-app -e RAILS_MASTER_KEY=<value from config/master.key> my-app
+# Frozen Debian snapshot for reproducible builds (bump when you want newer packages)
+ARG DEBIAN_SNAPSHOT=20250830T000000Z
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Make sure RUBY_VERSION matches the Ruby version in .ruby-version
-ARG RUBY_VERSION=3.2.4
-FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
+# Replace ALL apt sources with a single snapshot (deb822), harden apt, install build tools
+RUN set -eux; \
+  # Remove any existing sources (legacy and deb822)
+  rm -f /etc/apt/sources.list; \
+  rm -f /etc/apt/sources.list.d/*; \
+  \
+  # Create deb822 snapshot sources file without heredocs (avoid parser issues)
+  mkdir -p /etc/apt/sources.list.d; \
+  printf '%s\n' \
+    'Types: deb' \
+    "URIs: https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" \
+    'Suites: bookworm' \
+    'Components: main contrib non-free non-free-firmware' \
+    '' \
+    'Types: deb' \
+    "URIs: https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" \
+    'Suites: bookworm-updates' \
+    'Components: main contrib non-free non-free-firmware' \
+    '' \
+    'Types: deb' \
+    "URIs: https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}" \
+    'Suites: bookworm-security' \
+    'Components: main contrib non-free non-free-firmware' \
+    > /etc/apt/sources.list.d/snapshot.sources; \
+  \
+  # APT tweaks for snapshots & flaky caches
+  mkdir -p /etc/apt/apt.conf.d; \
+  printf '%s\n' \
+    'Acquire::Check-Valid-Until "false";' \
+    'Acquire::Retries "5";' \
+    'Acquire::http::No-Cache "true";' \
+    'Acquire::http::Pipeline-Depth "0";' \
+    > /etc/apt/apt.conf.d/99snapshot.conf; \
+  \
+  # Clean residual state, then update & install
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential; \
+  apt-get clean; \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
-# Rails app lives here
-WORKDIR /rails
+# App setup
+WORKDIR /app
 
-# Install base packages
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y curl libjemalloc2 libvips sqlite3 && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
-
-# Set production environment
-ENV RAILS_ENV="production" \
-    BUNDLE_DEPLOYMENT="1" \
-    BUNDLE_PATH="/usr/local/bundle" \
-    BUNDLE_WITHOUT="development"
-
-# Throw-away build stage to reduce size of final image
-FROM base AS build
-
-# Install packages needed to build gems
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential git pkg-config && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
-
-# Install application gems
+# Install gems
 COPY Gemfile Gemfile.lock ./
-RUN bundle install && \
-    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
-    bundle exec bootsnap precompile --gemfile
+RUN gem install bundler && bundle install --jobs 4
 
-# Copy application code
+# Copy app code
 COPY . .
 
-# Precompile bootsnap code for faster boot times
-RUN bundle exec bootsnap precompile app/ lib/
+# Non-root user
+RUN groupadd --system app && \
+    useradd --system --create-home --gid app appuser && \
+    chown -R appuser:app /app
+USER appuser
 
-# Precompiling assets for production without requiring secret RAILS_MASTER_KEY
-RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
-
-
-
-
-# Final stage for app image
-FROM base
-
-# Copy built artifacts: gems, application
-COPY --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
-COPY --from=build /rails /rails
-
-# Run and own only the runtime files as a non-root user for security
-RUN groupadd --system --gid 1000 rails && \
-    useradd rails --uid 1000 --gid 1000 --create-home --shell /bin/bash && \
-    chown -R rails:rails db log storage tmp
-USER 1000:1000
-
-# Entrypoint prepares the database.
-ENTRYPOINT ["/rails/bin/docker-entrypoint"]
-
-# Start the server by default, this can be overwritten at runtime
+# Rails port
 EXPOSE 3000
-CMD ["./bin/rails", "server"]
+
+# Use JSON-array CMD form (good with signals)
+CMD ["bin/rails", "server", "-b", "0.0.0.0"]
