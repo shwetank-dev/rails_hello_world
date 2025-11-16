@@ -148,6 +148,7 @@ GEM
     nio4r (2.7.5)
     nokogiri (1.18.10-x86_64-darwin)
       racc (~> 1.4)
+    pg (1.6.2-x86_64-darwin)
     pp (0.6.3)
       prettyprint
     prettyprint (0.2.0)
@@ -251,6 +252,7 @@ DEPENDENCIES
   debug
   importmap-rails
   jbuilder
+  pg (~> 1.4)
   puma (~> 5.0)
   rails (~> 7.0.4)
   selenium-webdriver
